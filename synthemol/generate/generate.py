@@ -43,6 +43,7 @@ def generate(
     score_model_paths: list[str] | None = None,
     score_fingerprint_types: list[str] | None = None,
     score_names: list[str] | None = None,
+    input_smiles: str | None = None,
     base_score_weights: list[float] | None = None,
     score_signs: list[Literal[1, -1]] | None = None,
     success_thresholds: list[str] | None = None,
@@ -98,6 +99,7 @@ def generate(
         the corresponding fingerprint type must be "None".
         If all score types do not require fingerprints, this argument can be None.
     :param score_names: List of names for each score. If None, scores will be named "Score 1", "Score 2", etc.
+    :param input_smiles: SMILES string of the input molecule, used for "tanimoto_to_input" score type.
     :param base_score_weights: Initial weights for each score for defining the reward function.
         If None, defaults to equal weights for each score.
     :param score_signs: Signs (+1 or -1) for each of the scores in order to match the score to the maximization optimization.
@@ -157,6 +159,11 @@ def generate(
     if rl_model_type == "mlp" and rl_model_fingerprint_type is None:
         raise ValueError("MLP RL models must have a fingerprint type that is not None")
 
+    if "tanimoto_to_input" in score_types and input_smiles is None:
+        raise ValueError(
+            '--input_smiles is required when using "tanimoto_to_input" score type.'
+        )
+
     if score_model_paths is not None:
         score_model_paths: list[Path | None] = [
             Path(score_model_path) if score_model_path not in ("None", None) else None
@@ -182,6 +189,14 @@ def generate(
     # Set up default score weights as equal weighting
     if base_score_weights is None:
         base_score_weights = [1 / num_scores] * num_scores
+
+    # Adjust score_names default if input_smiles is provided and score_names is None
+    if (
+        input_smiles is not None
+        and score_types == ["tanimoto_to_input"]
+        and score_names is None
+    ):
+        score_names = ["tanimoto_to_input"]
 
     # Check lengths of model arguments match
     for arg in [
@@ -484,6 +499,7 @@ def generate(
         score_weights=score_weights,
         model_paths=score_model_paths,
         fingerprint_types=score_fingerprint_types,
+        input_smiles=input_smiles,
         h2o_solvents=h2o_solvents,
         device=device,
         smiles_to_scores=building_block_smiles_to_scores,

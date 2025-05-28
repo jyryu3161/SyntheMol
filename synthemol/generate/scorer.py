@@ -2,11 +2,13 @@
 from abc import ABC, abstractmethod
 from pathlib import Path
 
+import numpy as np
 import torch
-from chemfunc import compute_fingerprint
+from chemfunc import compute_fingerprint, get_fingerprint_generator
 from rdkit import Chem
 from rdkit.Chem.Crippen import MolLogP
 from rdkit.Chem.QED import qed
+from sklearn.metrics import pairwise_distances
 
 
 from synthemol.constants import FINGERPRINT_TYPES, SCORE_TYPES
@@ -31,6 +33,35 @@ class Scorer(ABC):
         :return: The score of the molecule.
         """
         pass
+
+
+class TanimotoToInputScorer(Scorer):
+    """Scores molecules based on Tanimoto similarity to an input SMILES string."""
+
+    def __init__(self, input_smiles: str, fingerprint_type: FINGERPRINT_TYPES = "morgan") -> None:
+        """Initialize the scorer.
+
+        :param input_smiles: The SMILES string of the input molecule.
+        :param fingerprint_type: The type of fingerprint to use for Tanimoto similarity.
+        """
+        self.input_smiles = input_smiles
+        self.fingerprint_type = fingerprint_type
+        self.fp_generator = get_fingerprint_generator(fingerprint_type)
+        self.input_fp = self.fp_generator(self.input_smiles).reshape(1, -1)
+
+    def __call__(self, smiles: str) -> float:
+        """Scores a molecule based on Tanimoto similarity to the input SMILES.
+
+        :param smiles: A SMILES string.
+        :return: The Tanimoto similarity to the input SMILES.
+        """
+        try:
+            candidate_fp = self.fp_generator(smiles).reshape(1, -1)
+            # pairwise_distances with jaccard metric returns distance, so 1.0 - dist for similarity
+            dist = pairwise_distances(self.input_fp, candidate_fp, metric='jaccard', n_jobs=1)[0][0]
+            return 1.0 - dist
+        except ValueError:  # Handle invalid SMILES strings
+            return 0.0
 
 
 class QEDScorer(Scorer):
@@ -180,6 +211,7 @@ def create_scorer(
     fingerprint_type: FINGERPRINT_TYPES | None = None,
     device: torch.device = torch.device("cpu"),
     h2o_solvents: bool = False,
+    input_smiles: str | None = None,
 ) -> Scorer:
     """Creates a scorer object that scores a molecule.
 
@@ -192,24 +224,30 @@ def create_scorer(
             fingerprint type should be the type of fingerprint (e.g., "rdkit").
             For model-based scores that don't require fingerprints or non-model-based scores,
             the corresponding fingerprint type must be None.
+            For "tanimoto_to_input", this specifies the fingerprint for similarity calculation.
     :param device: The device on which to run the scorer.
+    :param input_smiles: The input SMILES string, required for "tanimoto_to_input" scorer.
     """
     if score_type == "qed":
         if model_path is not None:
             raise ValueError("QED does not use a model path.")
-
         if fingerprint_type is not None:
             raise ValueError("QED does not use fingerprints.")
-
         scorer = QEDScorer()
-    if score_type == "clogp":
+    elif score_type == "clogp":
         if model_path is not None:
             raise ValueError("CLogP does not use a model path.")
-
         if fingerprint_type is not None:
             raise ValueError("CLogP does not use fingerprints.")
-
         scorer = CLogPScorer()
+    elif score_type == "tanimoto_to_input":
+        if model_path is not None:
+            raise ValueError("tanimoto_to_input does not use a model path.")
+        if input_smiles is None:
+            raise ValueError("tanimoto_to_input requires an input_smiles.")
+        # Use provided fingerprint_type, default to "morgan" if None
+        fp_type_for_tanimoto = fingerprint_type if fingerprint_type is not None else "morgan"
+        scorer = TanimotoToInputScorer(input_smiles=input_smiles, fingerprint_type=fp_type_for_tanimoto)
     elif score_type == "chemprop":
         if model_path is None:
             raise ValueError("Chemprop requires a model path.")
@@ -238,6 +276,7 @@ class MoleculeScorer:
         score_weights: ScoreWeights,
         model_paths: list[Path | None] | None = None,
         fingerprint_types: list[FINGERPRINT_TYPES | None] | None = None,
+        input_smiles: str | None = None,
         h2o_solvents: bool = False,
         device: torch.device = torch.device("cpu"),
         smiles_to_scores: dict[str, list[float]] | None = None,
@@ -256,6 +295,7 @@ class MoleculeScorer:
             For model-based scores that don't require fingerprints or non-model-based scores,
             the corresponding fingerprint type must be None.
             If all score types do not require fingerprints, this argument can be None.
+        :param input_smiles: SMILES string of the input molecule, used for "tanimoto_to_input" score type.
         :param h2o_solvents: Whether to concatenate H2O solvent features with the molecule features during prediction.
         :param device: The device on which to run the scorer.
         :param smiles_to_scores: An optional dictionary mapping SMILES to precomputed scores.
@@ -263,6 +303,7 @@ class MoleculeScorer:
         # Save parameters
         self.score_weights = score_weights
         self.smiles_to_individual_scores = smiles_to_scores
+        self.input_smiles = input_smiles
 
         # Handle None model_paths and fingerprint_types
         if model_paths is None:
@@ -279,6 +320,7 @@ class MoleculeScorer:
                 fingerprint_type=fingerprint_type,
                 device=device,
                 h2o_solvents=h2o_solvents,
+                input_smiles=self.input_smiles,
             )
             for score_type, model_path, fingerprint_type in zip(
                 score_types, model_paths, fingerprint_types
