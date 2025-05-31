@@ -1,254 +1,107 @@
-# SyntheMol: Generative AI for Drug Discovery
+# Similarity-Guided Synthesis Pathway Generation
 
-[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/synthemol)](https://badge.fury.io/py/synthemol)
-[![PyPI version](https://badge.fury.io/py/synthemol.svg)](https://badge.fury.io/py/synthemol)
-[![Downloads](https://pepy.tech/badge/synthemol)](https://pepy.tech/project/synthemol)
-[![license](https://img.shields.io/github/license/swansonk14/synthemol.svg)](https://github.com/swansonk14/SyntheMol/blob/main/LICENSE.txt)
+This project, adapted from the original [SyntheMol](https://github.com/swansonk14/SyntheMol) framework, focuses on generating synthesizable analogs and their reaction pathways for a user-provided chemical compound. Instead of optimizing for predicted bioactivity as in the original SyntheMol, this version utilizes Tanimoto similarity to a target molecule to guide the exploration of chemical space using Monte Carlo Tree Search (MCTS) or Reinforcement Learning (RL).
 
-SyntheMol is a generative AI method for designing structurally novel and diverse drug candidates with predicted
-bioactivity that are easy to synthesize.
+## Core Functionality
 
-SyntheMol consists of either a reinforcement learning model (SyntheMol-RL) or a Monte Carlo tree search (SyntheMol-MCTS) to explore a combinatorial chemical space consisting of
-molecular building blocks and chemical reactions. In both cases, SyntheMol is guided by a bioactivity prediction AI model, such as a
-graph neural network or multilayer perceptron. SyntheMol uses two chemical spaces which jointly contain over 46 billion molecules:
+Given a SMILES string of a target molecule, this tool will:
+1.  Search a defined chemical space (composed of building blocks and known reactions).
+2.  Identify molecules that are similar to the input molecule (based on Tanimoto similarity using Morgan fingerprints).
+3.  For these similar molecules, provide the sequence of reactions and building blocks required for their synthesis.
 
-[Enamine REAL Space](https://enamine.net/compound-collections/real-compounds/real-space-navigator)
-* 137,656 molecular building blocks
-* 70 chemical reactions
-* 30,330,025,259 molecules
+This allows for the exploration of feasible synthetic routes to analogs of a compound of interest.
 
-[WuXi GalaXi](https://www.biosolveit.de/wp-content/uploads/2021/08/Xu.pdf)
-* 14,977 molecular building blocks
-* 36 chemical reactions
-* 16,146,071,436 molecules
+## Key Features
 
-Notably, SyntheMol can be easily adapted to use any set of building blocks and reactions.
-
-SyntheMol-RL will be described in a forthcoming paper.
-
-SyntheMol-MCTS is described in the following paper, where we applied SyntheMol to design novel antibiotic candidates for the Gram-negative bacterium _Acinetobacter baumannii_.
-
-Swanson, K., Liu, G., Catacutan, D. B., Arnold, A., Zou, J., Stokes, J. M. [Generative AI for designing and validating easily synthesizable and structurally novel antibiotics](https://www.nature.com/articles/s42256-024-00809-7). _Nature Machine Intelligence_, 2024.
-
-Full details for reproducing the SyntheMol results in both papers are provided in the [docs](docs) directory.
-
-## Table of contents
-
-* [Installation](#installation)
-* [Combinatorial chemical space](#combinatorial-chemical-space)
-* [Bioactivity prediction model](#bioactivity-prediction-model)
-    + [Train model](#train-model)
-    + [Pre-compute building block scores](#pre-compute-building-block-scores)
-* [Generate molecules](#generate-molecules)
-* [Filter generated molecules](#filter-generated-molecules)
-    + [Novelty](#novelty)
-    + [Bioactivity](#bioactivity)
-    + [Diversity](#diversity)
+*   **Targeted Analog Generation**: Provide an input SMILES and find similar, synthesizable molecules.
+*   **Guided Search**: Employs MCTS or RL to navigate large chemical reaction spaces.
+*   **Similarity Metric**: Uses Tanimoto similarity with Morgan fingerprints as the primary score to optimize.
+*   **Synthesis Pathway Output**: Generates detailed step-by-step reaction pathways for candidate molecules.
+*   **Chemical Spaces**: Can utilize predefined chemical reaction spaces (e.g., Enamine REAL space, WuXi GalaXi) or custom-defined spaces.
 
 ## Installation
 
-SyntheMol can be installed in < 3 minutes on any operating system using pip (optionally within a conda environment).
-SyntheMol can be run on a standard laptop (e.g., 16 GB memory and 8-16 CPUs), although a GPU is useful for faster
-training and prediction of the underlying bioactivity prediction model (Chemprop).
+This project uses Conda for environment management.
 
-Optionally, create a conda environment.
+1.  **Prerequisites**:
+    *   An Ubuntu-like environment.
+    *   Conda (Miniconda or Anaconda) installed and available in your PATH.
+    *   Git for cloning the repository.
 
-```bash
-conda create -y -n synthemol python=3.12
-conda activate synthemol
-```
+2.  **Setup**:
+    ```bash
+    git clone <repository_url> # Replace <repository_url> with the actual URL
+    cd <repository_directory>
+    bash install.sh
+    ```
+    The `install.sh` script will:
+    *   Check for Conda.
+    *   Create a Conda environment named `synthemol_env` with necessary dependencies (including RDKit, PyTorch).
+    *   Install Python packages listed in `requirements_mcts.txt` and `requirements_rl.txt`.
 
-Install SyntheMol via pip.
+3.  **Activate Environment**:
+    After the script completes, activate the Conda environment:
+    ```bash
+    conda activate synthemol_env
+    ```
 
-```bash
-pip install synthemol
-```
+## Quick Start / Usage Example
 
-Alternatively, clone the repo and install SyntheMol locally.
+To generate molecules similar to a given input SMILES, use the `scripts/generate.py` script.
 
-```bash
-git clone https://github.com/swansonk14/SyntheMol.git
-cd SyntheMol
-pip install -e .
-```
-
-If there are version issues with the required packages, create a conda environment with specific working versions of the
-packages as follows.
-
-SyntheMol-RL
-
-```bash
-pip install -r requirements_rl.txt
-pip install -e .
-```
-
-SyntheMol-MCTS
+**Example Command:**
 
 ```bash
-pip install -r requirements_mcts.txt
-pip install -e .
+python scripts/generate.py \
+    --input_smiles "CC(=O)OC1=CC=CC=C1C(=O)O" \ # Example: Aspirin
+    --search_type "mcts" \
+    --chemical_spaces "real" \
+    --building_blocks_paths "synthemol/resources/real/building_blocks.csv" \
+    --reaction_to_building_blocks_paths "synthemol/resources/real/reaction_to_building_blocks.pkl" \
+    --score_types "tanimoto_to_input" \
+    --score_weights 1.0 \
+    --score_signs 1 \
+    --score_fingerprint_types "morgan" \
+    --score_names "tanimoto_similarity" \
+    --n_rollout 100 \
+    --max_reactions 2 \
+    --save_dir "output_similar_to_aspirin"
 ```
 
-**Note:** If you get the
-issue `ImportError: libXrender.so.1: cannot open shared object file: No such file or directory`,
-run `conda install -c conda-forge xorg-libxrender`.
+**Explanation of Key Arguments:**
 
-## Combinatorial chemical space
+*   `--input_smiles`: SMILES string of the molecule you want to find analogs for.
+*   `--search_type`: `mcts` or `rl`.
+*   `--chemical_spaces`: Defines the reaction space and building blocks (e.g., "real").
+*   `--building_blocks_paths`, `--reaction_to_building_blocks_paths`: Paths to chemical space definition files.
+*   `--score_types "tanimoto_to_input"`: Specifies that Tanimoto similarity to the `--input_smiles` should be used as the score.
+*   `--score_weights 1.0`: Weight for the Tanimoto score (if it's the only score).
+*   `--score_signs 1`: Maximize the Tanimoto score.
+*   `--score_fingerprint_types "morgan"`: Fingerprint type for Tanimoto calculation.
+*   `--score_names`: Name for the score column in the output CSV.
+*   `--n_rollout`: Number of MCTS/RL rollouts to perform. More rollouts can lead to better results but take longer.
+*   `--max_reactions`: Maximum number of reaction steps to build a molecule.
+*   `--save_dir`: Directory where results (CSV files, logs) will be saved.
 
-An alternate combinatorial chemical space can optionally be used by replacing the building blocks and chemical reactions as follows.
+For a runnable example, see the `run_example.sh` script in the repository root. You can adapt it for your own inputs.
 
-**Building blocks:** Create a building blocks file similar to `synthemol/resources/real/building_blocks.csv` with a custom file containing the building blocks. The file
-should be a CSV file with a header row and two columns: `smiles` and `reagent_id`. The `smiles` column should contain the SMILES
-string for each building block, and the `reagent_id` column should contain a unique ID for each building block.
+## Output Description
 
-**Chemical reactions:** In `SyntheMol/reactions/custom.py`, set `CUSTOM_REACTIONS` to a list of `Reaction` objects
-similar to the `REAL_REACTIONS` list in `SyntheMol/reactions/real.py`. Then specify `--chemical_spaces custom` when running SyntheMol.
+The primary output is a CSV file (e.g., `molecules.csv`) located in the specified `--save_dir`. This file contains:
+*   `smiles`: The SMILES string of the generated similar molecule.
+*   `node_id`, `rollout_num`, etc.: Search process information.
+*   `tanimoto_similarity` (or your specified `--score_names`): The Tanimoto similarity score to your input molecule.
+*   `num_reactions`: Number of reactions in the synthesis.
+*   `reaction_X_chemical_space`, `reaction_X_id`: Information about each reaction step.
+*   `building_block_X_Y_id`, `building_block_X_Y_smiles`: Details of each building block used in each reaction.
 
-## Bioactivity prediction model
+This provides a full synthesis pathway for each generated analog.
 
-SyntheMol requires a bioactivity prediction model to guide its generative process. SyntheMol is designed to use one of
-these types of models:
+## Original Project
 
-1. **Chemprop:** a message passing neural network from https://github.com/chemprop/chemprop
-2. **Chemprop-RDKit:** Chemprop augmented with 200 RDKit molecular features
-3. **MLP-RDKit:** a feed-forward neural network using 200 RDKit molecular features
-4. **Random forest:** a scikit-learn random forest model trained on 200 RDKit molecular features (SyntheMol-MCTS only)
+This work is based on the SyntheMol project by Swanson et al., originally aimed at designing novel bioactive compounds. For details on the original framework and its applications in antibiotic discovery, please refer to:
+*   **GitHub**: [swansonk14/SyntheMol](https://github.com/swansonk14/SyntheMol)
+*   **Paper**: Swanson, K., Liu, G., Catacutan, D. B., Arnold, A., Zou, J., Stokes, J. M. Generative AI for designing and validating easily synthesizable and structurally novel antibiotics. _Nature Machine Intelligence_, 2024.
 
-### Train model
-
-All model types can be trained using [Chemprop](https://github.com/chemprop/chemprop), which is installed along
-with SyntheMol. All model types can be trained on either regression or binary classification bioactivities. Full
-details are provided in the [Chemprop](https://github.com/chemprop/chemprop) README. Below is an example for training a
-Chemprop model on a binary classification task. By default, training is done on a GPU (if available).
-
-Data file
-
-```bash
-# data/data.csv
-smiles,activity
-Br.CC(Cc1ccc(O)cc1)NCC(O)c1cc(O)cc(O)c1,0
-CC[Hg]Sc1ccccc1C(=O)[O-].[Na+],1
-O=C(O)CCc1ccc(NCc2cccc(Oc3ccccc3)c2)cc1,0
-...
-```
-
-Train Chemprop
-
-```bash
-chemprop_train \
-    --data_path data/data.csv \
-    --dataset_type classification \
-    --save_dir models/chemprop
-```
-
-### Pre-compute building block scores
-
-After training, use the model to pre-compute scores of building blocks to accelerate the SyntheMol generation process.
-Below is an example using the trained Chemprop model. By default, prediction is done on a GPU (if available).
-
-```bash
-chemprop_predict \
-    --test_path "$(python -c 'import synthemol; print(str(synthemol.constants.BUILDING_BLOCKS_PATH))')" \
-    --preds_path models/chemprop/building_blocks.csv \
-    --checkpoint_dir models/chemprop
-```
-
-## Generate molecules
-
-SyntheMol uses the bioactivity prediction model a generative model (RL or MCTS) to generate molecules. SyntheMol-RL can be powered either by a Chemprop-based RL model (RL-Chemprop) or an MLP-based RL model (RL-MLP). Below is an example using SyntheMol-RL (RL-Chemprop version) to generate molecules with a trained Chemprop model for 10,000 rollouts using the Enamine REAL Space (the default).
-
-```bash
-synthemol \
-    --score_model_paths models/chemprop \
-    --score_types chemprop \
-    --chemical_spaces real wuxi \
-    --building_blocks_score_columns activity \
-    --save_dir generations/chemprop \
-    --n_rollout 10000 \
-    --search_type rl \
-    --rl_model_type chemprop \
-    --rl_model_fingerprint_type rdkit \
-    --rl_model_paths models/chemprop/fold_0/model_0/model.pt \
-    --rl_prediction_types classification
-```
-
-Note: The `building_blocks_score_columns` must match the column name in the building blocks file that contains the
-building block scores. When using `chemprop_train` and `chemprop_predict`, the column name will be the same as the
-column that contains target activity/property values in the training data file (e.g., `activity`).
-
-For more complex examples with multiparameter optimization using both the RL-Chemprop and RL-MLP versions of SyntheMol-RL, please see [docs/rl/antibiotics.md](docs/rl/antibiotics.md).
-
-## Filter generated molecules
-
-Optionally, the generated molecules can be filtered for structural novelty, predicted bioactivity, and structural
-diversity. These filtering steps use [chemfunc](https://github.com/swansonk14/chemfunc), which is installed along with
-SyntheMol. Below is an example for filtering the generated molecules.
-
-### Novelty
-
-Filter for novelty by comparing the generated molecules to a set of active molecules (hits) from the training set or
-literature and removing similar generated molecules.
-
-Hits file
-
-```bash
-# data/hits.csv
-smiles,activity
-CC[Hg]Sc1ccccc1C(=O)[O-].[Na+],1
-O=C(NNc1ccccc1)c1ccncc1,1
-...
-```
-
-Compute Tversky similarity between generated molecules and hits.
-
-```bash
-chemfunc nearest_neighbor \
-    --data_path generations/chemprop/molecules.csv \
-    --reference_data_path data/hits.csv \
-    --reference_name hits \
-    --metric tversky
-```
-
-Filter by similarity, only keeping molecules with a nearest neighbor similarity to hits of at most 0.5.
-
-```bash
-chemfunc filter_molecules \
-    --data_path generations/chemprop/molecules.csv \
-    --save_path generations/chemprop/molecules_novel.csv \
-    --filter_column hits_tversky_nearest_neighbor_similarity \
-    --max_value 0.5
-```
-
-### Bioactivity
-
-Filter for predicted bioactivity by keeping the molecules with the top 20% highest predicted bioactivity.
-
-```bash
-chemfunc filter_molecules \
-    --data_path generations/chemprop/molecules_novel.csv \
-    --save_path generations/chemprop/molecules_novel_bioactive.csv \
-    --filter_column score \
-    --top_proportion 0.2
-```
-
-### Diversity
-
-Filter for diversity by clustering molecules based on their Morgan fingerprint and only keeping the top scoring molecule
-from each cluster.
-
-Cluster molecules into 50 clusters.
-
-```bash
-chemfunc cluster_molecules \
-    --data_path generations/chemprop/molecules_novel_bioactive.csv \
-    --num_clusters 50
-```
-
-Select the top scoring molecule from each cluster.
-
-```bash
-chemfunc select_from_clusters \
-    --data_path generations/chemprop/molecules_novel_bioactive.csv \
-    --save_path generations/chemprop/molecules_novel_bioactive_diverse.csv \
-    --value_column score
-```
+## License
+This project likely retains the original license from the SyntheMol repository (e.g., MIT License). Please check the `LICENSE` file for details.
