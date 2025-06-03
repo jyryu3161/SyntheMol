@@ -11,3 +11,4 @@ from synthemol.generate.rl_models import (
 )
 from synthemol.generate.scorer import MoleculeScorer
 from synthemol.generate.utils import save_generated_molecules
+from synthemol.generate.generate import generate_command_line
