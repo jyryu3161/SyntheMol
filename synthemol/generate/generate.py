@@ -4,6 +4,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
+from rdkit import Chem
+from rdkit.Chem import AllChem
+from rdkit.Chem import DataStructs
 import pandas as pd
 import torch
 import wandb
@@ -44,7 +47,11 @@ def generate(
     score_fingerprint_types: list[str] | None = None,
     score_names: list[str] | None = None,
     input_smiles: str | None = None,
+    input_smiles_for_scoring: str | None = None,
+    calculate_tanimoto_scores: bool = False,
+    new_tanimoto_score_column_name: str = "tanimoto_score",
     base_score_weights: list[float] | None = None,
+    score_weights: list[float] | None = None,
     score_signs: list[Literal[1, -1]] | None = None,
     success_thresholds: list[str] | None = None,
     chemical_spaces: tuple[CHEMICAL_SPACES, ...] = ("real",),
@@ -100,8 +107,13 @@ def generate(
         If all score types do not require fingerprints, this argument can be None.
     :param score_names: List of names for each score. If None, scores will be named "Score 1", "Score 2", etc.
     :param input_smiles: SMILES string of the input molecule, used for "tanimoto_to_input" score type.
+    :param input_smiles_for_scoring: SMILES string of the input molecule for Tanimoto similarity scoring.
+    :param calculate_tanimoto_scores: Whether to calculate Tanimoto similarity scores against `input_smiles_for_scoring`.
+    :param new_tanimoto_score_column_name: Name of the new column for Tanimoto scores.
     :param base_score_weights: Initial weights for each score for defining the reward function.
         If None, defaults to equal weights for each score.
+    :param score_weights: Initial weights for each score for defining the reward function.
+        If None, defaults to equal weights for each score. (Alternative to base_score_weights)
     :param score_signs: Signs (+1 or -1) for each of the scores in order to match the score to the maximization optimization.
     :param success_thresholds: The threshold for each score for defining success of the form ">= 0.5".
         If provided, the score weights will be dynamically set to maximize joint success
@@ -187,6 +199,8 @@ def generate(
     num_scores = len(score_types)
 
     # Set up default score weights as equal weighting
+    if base_score_weights is None and score_weights is not None:
+        base_score_weights = score_weights
     if base_score_weights is None:
         base_score_weights = [1 / num_scores] * num_scores
 
@@ -355,6 +369,55 @@ def generate(
                 f"Building block IDs are not unique in {chemical_space} chemical space."
             )
 
+    if calculate_tanimoto_scores:
+        if not input_smiles_for_scoring:
+            raise ValueError("If 'calculate_tanimoto_scores' is True, then 'input_smiles_for_scoring' must be provided.")
+
+        if not building_blocks_smiles_column: # Ensure smiles column name is available
+            raise ValueError("Cannot calculate Tanimoto scores without 'building_blocks_smiles_column'.")
+
+        print(f"Calculating Tanimoto similarities against: {input_smiles_for_scoring}")
+        target_mol = Chem.MolFromSmiles(input_smiles_for_scoring)
+        if not target_mol:
+            raise ValueError(f"Invalid SMILES string provided for 'input_smiles_for_scoring': {input_smiles_for_scoring}")
+        target_fp = AllChem.GetMorganFingerprintAsBitVect(target_mol, 2, nBits=2048)
+
+        for chemical_space, bb_data in chemical_space_to_building_block_data.items():
+            print(f"Processing building blocks for {chemical_space}...")
+            tanimoto_similarities = []
+            for idx, row in bb_data.iterrows():
+                smiles = row[building_blocks_smiles_column]
+                mol = Chem.MolFromSmiles(smiles)
+                if mol:
+                    fp = AllChem.GetMorganFingerprintAsBitVect(mol, 2, nBits=2048)
+                    similarity = DataStructs.TanimotoSimilarity(target_fp, fp)
+                    tanimoto_similarities.append(similarity)
+                else:
+                    # Handle invalid SMILES in building blocks - append a low score or NaN?
+                    # For now, let's append 0.0 and print a warning.
+                    print(f"Warning: Could not parse SMILES '{smiles}' in {chemical_space} at index {idx}. Assigning similarity of 0.0.")
+                    tanimoto_similarities.append(0.0)
+
+            bb_data[new_tanimoto_score_column_name] = tanimoto_similarities
+            print(f"Added column '{new_tanimoto_score_column_name}' with Tanimoto scores to {chemical_space} building blocks.")
+
+        # Ensure the new score column is used by downstream processes
+        # If building_blocks_score_columns was default ('score',), and new_tanimoto_score_column_name is different,
+        # update it. Or, if the user wants this to be THE score, they should set
+        # building_blocks_score_columns to new_tanimoto_score_column_name.
+        # For now, let's assume if they calculate it, they want to use it as the primary score.
+        # This might need refinement based on how users want to combine scores.
+        # A simple approach: if calculated, make it the first score column.
+        if new_tanimoto_score_column_name not in building_blocks_score_columns:
+             # Convert to list, add if not present, then convert back to tuple
+            temp_score_columns = list(building_blocks_score_columns)
+            if not temp_score_columns or temp_score_columns == [SCORE_COL]: # Default or empty
+                building_blocks_score_columns = (new_tanimoto_score_column_name,)
+            else:
+                # Add as the first score, or append? Let's prepend.
+                building_blocks_score_columns = tuple([new_tanimoto_score_column_name] + temp_score_columns)
+            print(f"Updated 'building_blocks_score_columns' to: {building_blocks_score_columns} to use calculated Tanimoto scores.")
+
     # Unique set of building block SMILES
     building_block_smiles: set[str] = set.union(
         *[
@@ -388,14 +451,26 @@ def generate(
     }
 
     # Map building block SMILES to scores
-    building_block_smiles_to_scores: dict[str, list[float]] = {
-        smiles: list(scores)
-        for building_block_data in chemical_space_to_building_block_data.values()
-        for smiles, scores in zip(
-            building_block_data[building_blocks_smiles_column],
-            building_block_data[building_blocks_score_columns].itertuples(index=False),
+    building_block_smiles_to_scores: dict[str, list[float]] = {}
+    try:
+        for building_block_data in chemical_space_to_building_block_data.values():
+            # Check if all score columns are present before iterating
+            missing_cols = [col for col in building_blocks_score_columns if col not in building_block_data.columns]
+            if missing_cols:
+                raise KeyError(f"Specified score columns {missing_cols} (from building_blocks_score_columns: {list(building_blocks_score_columns)}) not found in available building block data columns: {list(building_block_data.columns)}.")
+
+            for smiles, scores in zip(
+                building_block_data[building_blocks_smiles_column],
+                building_block_data[building_blocks_score_columns].itertuples(index=False),
+            ):
+                building_block_smiles_to_scores[smiles] = list(scores)
+    except KeyError as e:
+        raise ValueError(
+            f"Error accessing score columns {building_blocks_score_columns} from building block data. "
+            f"Details: {e}. Please ensure these columns exist in your building block CSV files. "
+            f"If your score columns have different names, please specify them using the "
+            f"'--building_blocks_score_columns' command-line argument (e.g., --building_blocks_score_columns col_name1 col_name2)."
         )
-    }
 
     # Optionally, set up Weights & Biases logging and log building block stats
     if wandb_log:
